@@ -119,6 +119,7 @@ function onConnectionLost(responseObject) {
         statusDot.className = "dot offline";
         toggleBtn.disabled = true;
         statusLabel.textContent = "Connection lost";
+        setTimeout(connectMqtt, 3000); // Auto reconnect
     }
 }
 
