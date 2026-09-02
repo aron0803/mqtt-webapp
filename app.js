@@ -20,6 +20,9 @@ let TOPIC_CMD = '';
 let TOPIC_STATE = '';
 let TOPIC_STATUS = '';
 
+// 繼電器腳位：ESP32-C6 為 GPIO18、ESP-01 為 GPIO0，收到裝置 state 回報後會自動更新
+let relayPin = 18;
+
 // Load saved settings
 function loadSettings() {
     inputBroker.value = localStorage.getItem('mqtt_broker') || '';
@@ -138,7 +141,9 @@ function onMessageArrived(message) {
             }
         } 
         else if (message.destinationName === TOPIC_STATE) {
-            if (data.pin === 0) {
+            // 以裝置回報的腳位為準，避免寫死腳位在換硬體後（ESP-01 GPIO0 / ESP32-C6 GPIO18）失效
+            if (typeof data.pin === 'number') {
+                relayPin = data.pin;
                 toggleBtn.checked = (data.state === 1);
                 statusLabel.textContent = toggleBtn.checked ? "Device is ON" : "Device is OFF";
                 statusLabel.style.color = 'var(--text-secondary)';
@@ -157,7 +162,7 @@ toggleBtn.addEventListener('change', (e) => {
     statusLabel.textContent = "Sending command...";
     
     const payload = JSON.stringify({
-        pin: 0, // ESP-01 繼電器控制腳位 (GPIO0)
+        pin: relayPin, // 由裝置的 state 回報決定，未收到前用預設值
         val: isChecked ? 1 : 0
     });
     
