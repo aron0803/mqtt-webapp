@@ -13,6 +13,14 @@ const inputBroker = document.getElementById('broker');
 const inputUser = document.getElementById('username');
 const inputPass = document.getElementById('password');
 
+// QR 掃描相關元素
+const btnScan = document.getElementById('btn-scan');
+const btnScanCancel = document.getElementById('btn-scan-cancel');
+const scanHint = document.getElementById('scan-hint');
+const scannerOverlay = document.getElementById('scanner-overlay');
+const scannerVideo = document.getElementById('scanner-video');
+const scannerStatus = document.getElementById('scanner-status');
+
 // MQTT Variables
 let client = null;
 const TENANT_ID = 'default';
@@ -23,32 +31,87 @@ let TOPIC_STATUS = '';
 // 繼電器腳位：ESP32-C6 為 GPIO18、ESP-01 為 GPIO0，收到裝置 state 回報後會自動更新
 let relayPin = 18;
 
-// 從 QR Code 帶入設定：格式為 #c=<base64url 編碼的 {"b":broker,"u":user,"p":pass}>
-// 刻意使用 hash 而非 query string——hash 不會送到伺服器，帳密不會進 GitHub Pages 的存取紀錄。
-// 讀取後立刻清除網址中的 hash，避免帳密殘留在網址列與瀏覽歷史中。
-function applyConfigFromHash() {
-    const match = location.hash.match(/[#&]c=([A-Za-z0-9_-]+)/);
-    if (!match) return false;
+// 解碼設定字串，回傳 {b,u,p} 或 null。
+// 可接受三種形式，讓「掃碼開網址」與「網頁內掃碼」共用同一種 QR：
+//   1. 完整網址含 #c=<token>
+//   2. 純 token（base64url 編碼的 JSON）
+//   3. 直接是 JSON {"b":...,"u":...,"p":...}
+function decodeConfigPayload(text) {
+    if (!text) return null;
+    let token = text.trim();
 
-    // 無論解析成功與否都先清掉 hash，避免帳密留在網址列
-    history.replaceState(null, '', location.pathname + location.search);
+    const urlMatch = token.match(/[#&]c=([A-Za-z0-9_-]+)/);
+    if (urlMatch) token = urlMatch[1];
+
+    // 形式 3：直接是 JSON
+    if (token.startsWith('{')) {
+        try {
+            const cfg = JSON.parse(token);
+            return (cfg.b && cfg.u) ? cfg : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    if (!/^[A-Za-z0-9_-]+$/.test(token)) return null;
 
     try {
-        const base64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+        let base64 = token.replace(/-/g, '+').replace(/_/g, '/');
+        base64 += '='.repeat((4 - base64.length % 4) % 4); // 補回被去掉的 padding
         // atob 產出的是 Latin-1 位元組，需再解成 UTF-8 才能正確處理非 ASCII 字元
         const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
         const cfg = JSON.parse(new TextDecoder().decode(bytes));
-
-        if (!cfg.b || !cfg.u) return false;
-
-        localStorage.setItem('mqtt_broker', cfg.b);
-        localStorage.setItem('mqtt_user', cfg.u);
-        localStorage.setItem('mqtt_pass', cfg.p || '');
-        return true;
+        return (cfg.b && cfg.u) ? cfg : null;
     } catch (e) {
         console.error('QR config parse error:', e);
+        return null;
+    }
+}
+
+function encodeConfigPayload(cfg) {
+    const json = JSON.stringify({ b: cfg.b, u: cfg.u, p: cfg.p || '' });
+    const bytes = new TextEncoder().encode(json);
+    const binary = Array.from(bytes, b => String.fromCharCode(b)).join('');
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+// 把設定同步回網址 hash，讓「加入主畫面」不論從哪個途徑設定完成，
+// 存下來的捷徑都自帶設定（iOS 捷徑存的是當下網址）。
+function syncConfigToUrl(cfg) {
+    try {
+        history.replaceState(null, '',
+            location.pathname + location.search + '#c=' + encodeConfigPayload(cfg));
+    } catch (e) {
+        console.error('sync config to url failed:', e);
+    }
+}
+
+function saveConfig(cfg) {
+    localStorage.setItem('mqtt_broker', cfg.b);
+    localStorage.setItem('mqtt_user', cfg.u);
+    localStorage.setItem('mqtt_pass', cfg.p || '');
+    syncConfigToUrl(cfg);
+}
+
+// 從網址 hash 帶入設定。刻意使用 hash 而非 query string——hash 不會送到伺服器，
+// 帳密不會進 GitHub Pages 的存取紀錄。
+//
+// 注意：這裡「不」清除 hash。iOS 的「加入主畫面」存的是當下網址，若先清掉 hash，
+// 捷徑就只剩乾淨網址；而 iOS 獨立 App 的儲存空間與 Safari 不共用，開啟後會變成
+// 未設定狀態，每次都要重設。保留 hash 才能讓捷徑自帶設定、每次開啟自動連線。
+// 代價是帳密會留在網址中，因此請勿分享此網址（分享等同交出 broker 控制權）。
+function applyConfigFromHash() {
+    if (!location.hash.includes('c=')) return false;
+
+    const cfg = decodeConfigPayload(location.hash);
+    if (!cfg) {
+        // 解析失敗才清掉，避免壞掉的字串一直卡在網址列
+        history.replaceState(null, '', location.pathname + location.search);
         return false;
     }
+
+    saveConfig(cfg);
+    return true;
 }
 
 // Load saved settings
@@ -66,11 +129,160 @@ function loadSettings() {
     }
 }
 
+// ===== 相機掃描 QR Code =====
+// 優先使用瀏覽器原生的 BarcodeDetector（Android Chrome 支援）；
+// iOS Safari 尚未支援，改為延遲載入 jsQR 作為後備方案。
+let scanStream = null;
+let scanRafId = null;
+let jsQrLoader = null;
+
+function loadJsQr() {
+    if (window.jsQR) return Promise.resolve(window.jsQR);
+    if (jsQrLoader) return jsQrLoader;
+
+    // jsQR 未上架 cdnjs，需改用 jsDelivr；unpkg 為備援來源
+    const sources = [
+        'https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js',
+        'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js'
+    ];
+
+    jsQrLoader = sources.reduce(
+        (chain, src) => chain.catch(() => new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = src;
+            s.onload = () => window.jsQR ? resolve(window.jsQR) : reject(new Error('jsQR missing'));
+            s.onerror = () => reject(new Error('load failed: ' + src));
+            document.head.appendChild(s);
+        })),
+        Promise.reject(new Error('init'))
+    ).catch(err => {
+        jsQrLoader = null; // 允許之後重試（例如當下沒網路）
+        throw err;
+    });
+
+    return jsQrLoader;
+}
+
+function stopScanner() {
+    if (scanRafId) {
+        cancelAnimationFrame(scanRafId);
+        scanRafId = null;
+    }
+    if (scanStream) {
+        scanStream.getTracks().forEach(t => t.stop()); // 務必關閉，否則相機燈會一直亮著
+        scanStream = null;
+    }
+    scannerVideo.srcObject = null;
+    scannerOverlay.classList.add('hidden');
+}
+
+function onScanSuccess(text) {
+    const cfg = decodeConfigPayload(text);
+    if (!cfg) {
+        scannerStatus.textContent = '這不是有效的設定 QR Code，請再試一次';
+        scannerStatus.classList.add('error');
+        return false; // 繼續掃描
+    }
+
+    stopScanner();
+    saveConfig(cfg);
+    inputBroker.value = cfg.b;
+    inputUser.value = cfg.u;
+    inputPass.value = cfg.p || '';
+
+    scanHint.textContent = `已讀取設定：${cfg.u} @ ${cfg.b}`;
+    scanHint.classList.remove('hidden', 'error');
+    connectMqtt();
+    return true;
+}
+
+async function startScanner() {
+    scanHint.classList.add('hidden');
+    scannerStatus.classList.remove('error');
+    scannerStatus.textContent = '正在啟動相機…';
+    scannerOverlay.classList.remove('hidden');
+
+    // 相機需要安全來源（HTTPS 或 localhost），http 網址會直接沒有 mediaDevices
+    if (!navigator.mediaDevices?.getUserMedia) {
+        scannerStatus.textContent = '此瀏覽器不支援相機，或網頁不是以 HTTPS 開啟';
+        scannerStatus.classList.add('error');
+        return;
+    }
+
+    try {
+        scanStream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' }, // 優先使用後鏡頭
+            audio: false
+        });
+    } catch (e) {
+        console.error('getUserMedia error:', e);
+        scannerStatus.textContent = (e.name === 'NotAllowedError')
+            ? '相機權限被拒絕，請於瀏覽器設定中允許後再試'
+            : '無法開啟相機：' + e.name;
+        scannerStatus.classList.add('error');
+        return;
+    }
+
+    scannerVideo.srcObject = scanStream;
+    await scannerVideo.play();
+    scannerStatus.textContent = '請將 QR Code 對準框內';
+
+    let detector = null;
+    if ('BarcodeDetector' in window) {
+        try {
+            detector = new BarcodeDetector({ formats: ['qr_code'] });
+        } catch (e) {
+            detector = null;
+        }
+    }
+
+    let jsQR = null;
+    let canvas = null;
+    let ctx = null;
+    if (!detector) {
+        try {
+            jsQR = await loadJsQr();
+        } catch (e) {
+            scannerStatus.textContent = '無法載入掃描元件，請改用手動輸入';
+            scannerStatus.classList.add('error');
+            return;
+        }
+        canvas = document.createElement('canvas');
+        ctx = canvas.getContext('2d', { willReadFrequently: true });
+    }
+
+    const tick = async () => {
+        if (!scanStream) return; // 已取消
+
+        if (scannerVideo.readyState === scannerVideo.HAVE_ENOUGH_DATA) {
+            try {
+                if (detector) {
+                    const codes = await detector.detect(scannerVideo);
+                    if (codes.length && onScanSuccess(codes[0].rawValue)) return;
+                } else {
+                    canvas.width = scannerVideo.videoWidth;
+                    canvas.height = scannerVideo.videoHeight;
+                    ctx.drawImage(scannerVideo, 0, 0, canvas.width, canvas.height);
+                    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                    const code = jsQR(img.data, img.width, img.height);
+                    if (code && onScanSuccess(code.data)) return;
+                }
+            } catch (e) {
+                console.error('scan error:', e);
+            }
+        }
+        scanRafId = requestAnimationFrame(tick);
+    };
+    scanRafId = requestAnimationFrame(tick);
+}
+
+btnScan.addEventListener('click', startScanner);
+btnScanCancel.addEventListener('click', stopScanner);
+
 // Save settings and connect
 btnConnect.addEventListener('click', () => {
-    localStorage.setItem('mqtt_broker', inputBroker.value);
-    localStorage.setItem('mqtt_user', inputUser.value);
-    localStorage.setItem('mqtt_pass', inputPass.value);
+    // 走 saveConfig 統一入口，設定才會一併同步到網址，供「加入主畫面」使用
+    saveConfig({ b: inputBroker.value, u: inputUser.value, p: inputPass.value });
     connectMqtt();
 });
 

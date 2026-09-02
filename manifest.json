@@ -1,0 +1,19 @@
+{
+  "name": "MQTT Remote Control",
+  "short_name": "MQTT 控制",
+  "description": "手機端 MQTT 繼電器遠端控制面板",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

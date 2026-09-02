@@ -4,7 +4,17 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>MQTT Remote Control</title>
-    
+
+    <!-- PWA：讓「加入主畫面」後以獨立 App 形式開啟 -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="MQTT 控制">
+    <link rel="apple-touch-icon" href="icon.svg">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+
     <!-- Google Fonts: Inter -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -38,7 +48,30 @@
                 <input type="password" id="password" placeholder="••••••••">
             </div>
             
-            <button id="btn-connect" class="primary-btn">Connect & Save</button>
+            <button id="btn-scan" class="scan-btn">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M3 7V5a2 2 0 0 1 2-2h2"></path>
+                    <path d="M17 3h2a2 2 0 0 1 2 2v2"></path>
+                    <path d="M21 17v2a2 2 0 0 1-2 2h-2"></path>
+                    <path d="M7 21H5a2 2 0 0 1-2-2v-2"></path>
+                    <rect x="7" y="7" width="4" height="4"></rect>
+                    <rect x="13" y="13" width="4" height="4"></rect>
+                </svg>
+                掃描 QR Code
+            </button>
+            <p id="scan-hint" class="scan-hint hidden"></p>
+
+            <button id="btn-connect" class="primary-btn">Connect &amp; Save</button>
+        </div>
+
+        <!-- QR 掃描畫面：開啟相機即時辨識，成功後自動填入上方欄位 -->
+        <div id="scanner-overlay" class="scanner-overlay hidden">
+            <div class="scanner-box">
+                <video id="scanner-video" playsinline muted></video>
+                <div class="scanner-frame"></div>
+            </div>
+            <p id="scanner-status" class="scanner-status">正在啟動相機…</p>
+            <button id="btn-scan-cancel" class="secondary-btn">取消</button>
         </div>
 
         <!-- Main Dashboard -->
@@ -87,6 +120,6 @@
 
     <!-- Application Logic -->
     <!-- 版本號用於破快取：修改 app.js 後請一併把 v 加一，否則回訪的手機會續用舊版 -->
-    <script src="app.js?v=3"></script>
+    <script src="app.js?v=5"></script>
 </body>
 </html>
