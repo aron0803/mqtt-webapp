@@ -23,12 +23,42 @@ let TOPIC_STATUS = '';
 // 繼電器腳位：ESP32-C6 為 GPIO18、ESP-01 為 GPIO0，收到裝置 state 回報後會自動更新
 let relayPin = 18;
 
+// 從 QR Code 帶入設定：格式為 #c=<base64url 編碼的 {"b":broker,"u":user,"p":pass}>
+// 刻意使用 hash 而非 query string——hash 不會送到伺服器，帳密不會進 GitHub Pages 的存取紀錄。
+// 讀取後立刻清除網址中的 hash，避免帳密殘留在網址列與瀏覽歷史中。
+function applyConfigFromHash() {
+    const match = location.hash.match(/[#&]c=([A-Za-z0-9_-]+)/);
+    if (!match) return false;
+
+    // 無論解析成功與否都先清掉 hash，避免帳密留在網址列
+    history.replaceState(null, '', location.pathname + location.search);
+
+    try {
+        const base64 = match[1].replace(/-/g, '+').replace(/_/g, '/');
+        // atob 產出的是 Latin-1 位元組，需再解成 UTF-8 才能正確處理非 ASCII 字元
+        const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+        const cfg = JSON.parse(new TextDecoder().decode(bytes));
+
+        if (!cfg.b || !cfg.u) return false;
+
+        localStorage.setItem('mqtt_broker', cfg.b);
+        localStorage.setItem('mqtt_user', cfg.u);
+        localStorage.setItem('mqtt_pass', cfg.p || '');
+        return true;
+    } catch (e) {
+        console.error('QR config parse error:', e);
+        return false;
+    }
+}
+
 // Load saved settings
 function loadSettings() {
+    applyConfigFromHash();
+
     inputBroker.value = localStorage.getItem('mqtt_broker') || '';
     inputUser.value = localStorage.getItem('mqtt_user') || '';
     inputPass.value = localStorage.getItem('mqtt_pass') || '';
-    
+
     if (inputBroker.value && inputUser.value) {
         connectMqtt();
     } else {
