@@ -73,6 +73,16 @@
             color: var(--text-dim);
             min-height: 1.2em;
         }
+        #meta {
+            font-size: 0.75rem;
+            color: var(--text-dim);
+            opacity: 0.7;
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        #meta span { white-space: nowrap; }
         #retry {
             display: none;
             margin-top: 0.5rem;
@@ -98,6 +108,10 @@
         <div id="icon" class="pending">🔌</div>
         <div id="status">連線中…</div>
         <div id="detail"></div>
+        <div id="meta">
+            <span id="meta-time"></span>
+            <span id="meta-ip"></span>
+        </div>
         <button id="retry">重試</button>
         <a id="setup-link" href="index.html">尚未設定，點此開啟設定頁</a>
     </div>
@@ -114,8 +128,14 @@
         const elIcon = document.getElementById('icon');
         const elStatus = document.getElementById('status');
         const elDetail = document.getElementById('detail');
+        const elMetaTime = document.getElementById('meta-time');
+        const elMetaIp = document.getElementById('meta-ip');
         const elRetry = document.getElementById('retry');
         const elSetupLink = document.getElementById('setup-link');
+
+        // 從頁面一開始載入就計時（含連線耗時），才是使用者實際感受到的「總共花多少時間」，
+        // 不是只算送出指令到收到回應那一小段
+        const t0 = performance.now();
 
         function setState(mode, status, detail) {
             elIcon.className = mode;
@@ -175,6 +195,7 @@
 
             const topicCmd = `iot/v1/${TENANT_ID}/${user}/cmd`;
             const topicState = `iot/v1/${TENANT_ID}/${user}/state`;
+            const topicStatus = `iot/v1/${TENANT_ID}/${user}/status`;
             const clientId = 'Opener_' + Math.random().toString(16).slice(2, 10);
             const client = new Paho.MQTT.Client(broker, 8884, clientId);
 
@@ -188,13 +209,22 @@
             };
 
             client.onMessageArrived = (msg) => {
+                if (msg.destinationName === topicStatus) {
+                    try {
+                        const data = JSON.parse(msg.payloadString);
+                        if (data.ip) elMetaIp.textContent = `裝置 IP：${data.ip}`;
+                    } catch (e) { /* ignore malformed payload */ }
+                    return;
+                }
                 if (msg.destinationName !== topicState) return;
                 try {
                     const data = JSON.parse(msg.payloadString);
                     if (data.state === 1) {
                         confirmed = true;
                         clearTimeout(timeoutId);
-                        setState('ok', '門已開啟', new Date().toLocaleTimeString('zh-TW', { hour12: false }));
+                        const elapsedMs = Math.round(performance.now() - t0);
+                        setState('ok', '門已開啟');
+                        elMetaTime.textContent = `總耗時：${elapsedMs} ms`;
                     }
                 } catch (e) { /* ignore malformed payload */ }
             };
@@ -206,6 +236,7 @@
                 timeout: 8,
                 onSuccess: () => {
                     client.subscribe(topicState);
+                    client.subscribe(topicStatus);
                     const message = new Paho.MQTT.Message(JSON.stringify({ pin: relayPin, val: 1 }));
                     message.destinationName = topicCmd;
                     client.send(message);
@@ -213,7 +244,9 @@
 
                     timeoutId = setTimeout(() => {
                         if (!confirmed) {
+                            const elapsedMs = Math.round(performance.now() - t0);
                             setState('err', '未收到裝置回應', '指令已送出，但無法確認是否成功');
+                            elMetaTime.textContent = `已等待：${elapsedMs} ms`;
                         }
                     }, CONFIRM_TIMEOUT_MS);
                 },
