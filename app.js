@@ -16,6 +16,8 @@ const inputPass = document.getElementById('password');
 // QR 掃描相關元素
 const btnScan = document.getElementById('btn-scan');
 const btnScanCancel = document.getElementById('btn-scan-cancel');
+const btnScanFile = document.getElementById('btn-scan-file');
+const scanFileInput = document.getElementById('scan-file-input');
 const scanHint = document.getElementById('scan-hint');
 const scannerOverlay = document.getElementById('scanner-overlay');
 const scannerVideo = document.getElementById('scanner-video');
@@ -279,6 +281,77 @@ async function startScanner() {
 
 btnScan.addEventListener('click', startScanner);
 btnScanCancel.addEventListener('click', stopScanner);
+
+// 從相簿/檔案讀取 QR：適合截圖存下的 QR、桌機沒相機、或相機權限被拒的情況
+btnScanFile.addEventListener('click', () => scanFileInput.click());
+
+scanFileInput.addEventListener('change', async () => {
+    const file = scanFileInput.files && scanFileInput.files[0];
+    scanFileInput.value = ''; // 清空，允許選同一張圖也能觸發下一次 change
+    if (!file) return;
+
+    scanHint.textContent = '正在辨識圖片中的 QR Code…';
+    scanHint.classList.remove('hidden', 'error');
+
+    try {
+        const bitmap = await loadImageFile(file);
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        ctx.drawImage(bitmap, 0, 0);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+        let text = null;
+
+        // 優先用原生 BarcodeDetector（多數 Android Chrome 支援，速度較快）
+        if ('BarcodeDetector' in window) {
+            try {
+                const detector = new BarcodeDetector({ formats: ['qr_code'] });
+                const codes = await detector.detect(bitmap);
+                if (codes.length) text = codes[0].rawValue;
+            } catch (e) { /* 退回 jsQR */ }
+        }
+
+        if (!text) {
+            const jsQR = await loadJsQr();
+            const code = jsQR(img.data, img.width, img.height);
+            if (code) text = code.data;
+        }
+
+        if (!text) {
+            scanHint.textContent = '這張圖片裡沒有偵測到 QR Code，請換一張';
+            scanHint.classList.add('error');
+            return;
+        }
+
+        // onScanSuccess 失敗時只會更新相機覆蓋層自己的 scannerStatus，但這裡
+        // 沒有開啟覆蓋層（不是用相機掃的），因此失敗要另外在 scanHint 顯示
+        if (!onScanSuccess(text)) {
+            scanHint.textContent = '這不是有效的設定 QR Code，請確認圖片內容';
+            scanHint.classList.add('error');
+        }
+    } catch (e) {
+        console.error('QR image decode error:', e);
+        scanHint.textContent = '無法讀取這張圖片，請確認格式後再試一次';
+        scanHint.classList.add('error');
+    }
+});
+
+// 將使用者選取的圖片檔載入成可畫進 canvas 的 bitmap；
+// createImageBitmap 效能較好，不支援的瀏覽器退回傳統 <img> 載入方式
+function loadImageFile(file) {
+    if (window.createImageBitmap) {
+        return createImageBitmap(file);
+    }
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+        img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+        img.src = url;
+    });
+}
 
 // Save settings and connect
 btnConnect.addEventListener('click', () => {

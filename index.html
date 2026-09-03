@@ -59,6 +59,15 @@
                 </svg>
                 掃描 QR Code
             </button>
+            <button id="btn-scan-file" class="scan-btn">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                    <path d="M21 15l-5-5L5 21"></path>
+                </svg>
+                從相簿選擇圖片
+            </button>
+            <input type="file" id="scan-file-input" accept="image/*" class="hidden">
             <p id="scan-hint" class="scan-hint hidden"></p>
 
             <button id="btn-connect" class="primary-btn">Connect &amp; Save</button>
@@ -120,6 +129,6 @@
 
     <!-- Application Logic -->
     <!-- 版本號用於破快取：修改 app.js 後請一併把 v 加一，否則回訪的手機會續用舊版 -->
-    <script src="app.js?v=5"></script>
+    <script src="app.js?v=6"></script>
 </body>
 </html>
