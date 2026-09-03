@@ -1,0 +1,19 @@
+{
+  "name": "門禁快速開門",
+  "short_name": "開門",
+  "description": "點圖示立即送出開門指令",
+  "start_url": "./open.html",
+  "scope": "./open.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "icon-open.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

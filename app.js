@@ -28,8 +28,9 @@ let TOPIC_CMD = '';
 let TOPIC_STATE = '';
 let TOPIC_STATUS = '';
 
-// 繼電器腳位：ESP32-C6 為 GPIO18、ESP-01 為 GPIO0，收到裝置 state 回報後會自動更新
-let relayPin = 18;
+// 繼電器腳位：由裝置的 retained state 回報決定並存進 localStorage，
+// 換硬體、換接腳後會自動更新；尚未收到任何回報時用這個預設值只是佔位
+let relayPin = parseInt(localStorage.getItem('relay_pin'), 10) || 1;
 
 // 解碼設定字串，回傳 {b,u,p} 或 null。
 // 可接受三種形式，讓「掃碼開網址」與「網頁內掃碼」共用同一種 QR：
@@ -386,6 +387,7 @@ function onMessageArrived(message) {
             // 以裝置回報的腳位為準，避免寫死腳位在換硬體後（ESP-01 GPIO0 / ESP32-C6 GPIO18）失效
             if (typeof data.pin === 'number') {
                 relayPin = data.pin;
+                localStorage.setItem('relay_pin', String(relayPin)); // 供一鍵開門頁 (open.html) 使用
                 toggleBtn.checked = (data.state === 1);
                 statusLabel.textContent = toggleBtn.checked ? "Device is ON" : "Device is OFF";
                 statusLabel.style.color = 'var(--text-secondary)';

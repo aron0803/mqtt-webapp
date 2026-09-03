@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>開門</title>
+
+    <link rel="manifest" href="manifest-open.json">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="開門">
+    <link rel="apple-touch-icon" href="icon-open.svg">
+    <link rel="icon" href="icon-open.svg" type="image/svg+xml">
+
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+    <style>
+        :root {
+            --bg: #0f172a;
+            --ok: #10b981;
+            --err: #ef4444;
+            --text: #f8fafc;
+            --text-dim: #94a3b8;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body {
+            height: 100%;
+            background: var(--bg);
+            color: var(--text);
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            overscroll-behavior: none;
+        }
+        #stage {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 1.5rem;
+            padding: 2rem;
+            text-align: center;
+            width: 100%;
+            max-width: 360px;
+        }
+        #icon {
+            width: 96px;
+            height: 96px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 3rem;
+            background: rgba(255,255,255,0.06);
+            transition: background 0.3s ease, transform 0.3s ease;
+        }
+        #icon.pending { animation: pulse 1.1s ease-in-out infinite; }
+        #icon.ok { background: rgba(16,185,129,0.18); transform: scale(1.05); }
+        #icon.err { background: rgba(239,68,68,0.18); }
+        @keyframes pulse {
+            0%, 100% { opacity: 0.5; }
+            50% { opacity: 1; }
+        }
+        #status {
+            font-size: 1.25rem;
+            font-weight: 700;
+        }
+        #detail {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            min-height: 1.2em;
+        }
+        #retry {
+            display: none;
+            margin-top: 0.5rem;
+            padding: 0.75rem 2rem;
+            background: rgba(255,255,255,0.1);
+            color: var(--text);
+            border: 1px solid rgba(255,255,255,0.15);
+            border-radius: 8px;
+            font-size: 1rem;
+            font-family: inherit;
+            cursor: pointer;
+        }
+        #setup-link {
+            display: none;
+            color: var(--text-dim);
+            font-size: 0.85rem;
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <div id="stage">
+        <div id="icon" class="pending">🔌</div>
+        <div id="status">連線中…</div>
+        <div id="detail"></div>
+        <button id="retry">重試</button>
+        <a id="setup-link" href="index.html">尚未設定，點此開啟設定頁</a>
+    </div>
+
+    <script>
+        // 一鍵開門頁：載入後自動連線、自動送出開門指令，不需要使用者再點任何東西。
+        // 這是使用者刻意選擇的行為（相較於多一次確認點擊），本頁不重複安全性
+        // 判斷——門機本身的失效安全設計（COM+NO 接線、看門狗、開機安全狀態）
+        // 都在裝置韌體端，跟這個頁面自動或手動觸發無關。
+
+        const TENANT_ID = 'default';
+        const CONFIRM_TIMEOUT_MS = 6000;
+
+        const elIcon = document.getElementById('icon');
+        const elStatus = document.getElementById('status');
+        const elDetail = document.getElementById('detail');
+        const elRetry = document.getElementById('retry');
+        const elSetupLink = document.getElementById('setup-link');
+
+        function setState(mode, status, detail) {
+            elIcon.className = mode;
+            elIcon.textContent = mode === 'ok' ? '✅' : (mode === 'err' ? '⚠️' : '🔌');
+            elStatus.textContent = status;
+            elDetail.textContent = detail || '';
+            elRetry.style.display = (mode === 'err') ? 'inline-block' : 'none';
+        }
+
+        function decodeConfigPayload(text) {
+            if (!text) return null;
+            let token = text.trim();
+            const urlMatch = token.match(/[#&]c=([A-Za-z0-9_-]+)/);
+            if (urlMatch) token = urlMatch[1];
+            if (token.startsWith('{')) {
+                try {
+                    const cfg = JSON.parse(token);
+                    return (cfg.b && cfg.u) ? cfg : null;
+                } catch (e) { return null; }
+            }
+            if (!/^[A-Za-z0-9_-]+$/.test(token)) return null;
+            try {
+                let base64 = token.replace(/-/g, '+').replace(/_/g, '/');
+                base64 += '='.repeat((4 - base64.length % 4) % 4);
+                const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+                const cfg = JSON.parse(new TextDecoder().decode(bytes));
+                return (cfg.b && cfg.u) ? cfg : null;
+            } catch (e) { return null; }
+        }
+
+        // 支援跟主頁一樣的 QR 設定 hash，方便同一張 QR 兩邊都能用來設定
+        if (location.hash.includes('c=')) {
+            const cfg = decodeConfigPayload(location.hash);
+            history.replaceState(null, '', location.pathname + location.search);
+            if (cfg) {
+                localStorage.setItem('mqtt_broker', cfg.b);
+                localStorage.setItem('mqtt_user', cfg.u);
+                localStorage.setItem('mqtt_pass', cfg.p || '');
+            }
+        }
+
+        const broker = localStorage.getItem('mqtt_broker');
+        const user = localStorage.getItem('mqtt_user');
+        const pass = localStorage.getItem('mqtt_pass') || '';
+        const relayPin = parseInt(localStorage.getItem('relay_pin'), 10) || 1;
+
+        if (!broker || !user) {
+            setState('err', '尚未設定', '請先到主頁完成連線設定');
+            elSetupLink.style.display = 'inline-block';
+        } else {
+            openDoor();
+        }
+
+        function openDoor() {
+            setState('pending', '連線中…', broker);
+            elSetupLink.style.display = 'none';
+
+            const topicCmd = `iot/v1/${TENANT_ID}/${user}/cmd`;
+            const topicState = `iot/v1/${TENANT_ID}/${user}/state`;
+            const clientId = 'Opener_' + Math.random().toString(16).slice(2, 10);
+            const client = new Paho.MQTT.Client(broker, 8884, clientId);
+
+            let confirmed = false;
+            let timeoutId = null;
+
+            client.onConnectionLost = (res) => {
+                if (!confirmed && res.errorCode !== 0) {
+                    setState('err', '連線中斷', res.errorMessage || '');
+                }
+            };
+
+            client.onMessageArrived = (msg) => {
+                if (msg.destinationName !== topicState) return;
+                try {
+                    const data = JSON.parse(msg.payloadString);
+                    if (data.state === 1) {
+                        confirmed = true;
+                        clearTimeout(timeoutId);
+                        setState('ok', '門已開啟', new Date().toLocaleTimeString('zh-TW', { hour12: false }));
+                    }
+                } catch (e) { /* ignore malformed payload */ }
+            };
+
+            client.connect({
+                userName: user,
+                password: pass,
+                useSSL: true,
+                timeout: 8,
+                onSuccess: () => {
+                    client.subscribe(topicState);
+                    const message = new Paho.MQTT.Message(JSON.stringify({ pin: relayPin, val: 1 }));
+                    message.destinationName = topicCmd;
+                    client.send(message);
+                    setState('pending', '已送出開門指令…', '等待裝置回應');
+
+                    timeoutId = setTimeout(() => {
+                        if (!confirmed) {
+                            setState('err', '未收到裝置回應', '指令已送出，但無法確認是否成功');
+                        }
+                    }, CONFIRM_TIMEOUT_MS);
+                },
+                onFailure: (err) => {
+                    setState('err', '連線失敗', (err && err.errorMessage) || '請檢查網路');
+                }
+            });
+        }
+
+        elRetry.addEventListener('click', () => {
+            location.reload();
+        });
+    </script>
+</body>
+</html>
