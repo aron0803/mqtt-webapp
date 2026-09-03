@@ -3,7 +3,7 @@
   "short_name": "開門",
   "description": "點圖示立即送出開門指令",
   "start_url": "./open.html",
-  "scope": "./open.html",
+  "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#0f172a",
