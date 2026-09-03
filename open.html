@@ -133,9 +133,14 @@
         const elRetry = document.getElementById('retry');
         const elSetupLink = document.getElementById('setup-link');
 
-        // 從頁面一開始載入就計時（含連線耗時），才是使用者實際感受到的「總共花多少時間」，
-        // 不是只算送出指令到收到回應那一小段
-        const t0 = performance.now();
+        // 目前進行中的連線與狀態；供 visibilitychange 重新觸發時判斷/清理用。
+        // 手機把 PWA 切到背景時「不會」重新整理頁面，只是把畫面調回前景，
+        // 若只在 <script> 第一次執行時觸發一次，之後從背景切回來就不會再開門，
+        // 這正是本頁改版的原因——改成每次「回到前景」都重新觸發一次。
+        let activeClient = null;
+        let busy = false;
+        let confirmed = false;
+        let t0 = 0;
 
         function setState(mode, status, detail) {
             elIcon.className = mode;
@@ -186,23 +191,53 @@
             setState('err', '尚未設定', '請先到主頁完成連線設定');
             elSetupLink.style.display = 'inline-block';
         } else {
+            attemptOpen();
+        }
+
+        // 每次「回到前景」都重新跑一次開門流程，涵蓋：
+        //   1. 第一次點圖示開啟（visibilityState 一開始就是 visible，此時走上面的初始呼叫）
+        //   2. app 被切到背景保留在記憶體、之後再次點圖示回到前景（不會重新整理頁面）
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                attemptOpen();
+            } else {
+                // 切到背景時，若尚未收到確認就先斷線、重置忙碌旗標，
+                // 避免殘留的連線卡住下次回到前景時的觸發
+                if (!confirmed && activeClient) {
+                    try { activeClient.disconnect(); } catch (e) { /* already closed */ }
+                }
+                busy = false;
+            }
+        });
+
+        function attemptOpen() {
+            if (!broker || !user) return;
+            if (busy) return; // 避免同一次前景期間被重複觸發（例如瀏覽器連發多個事件）
+            busy = true;
             openDoor();
         }
 
         function openDoor() {
+            // 每次觸發都重新計時、重新視為未確認，這樣切回前景重新開門時
+            // 「總耗時」顯示的才是這一次的時間，不是沿用上一次的舊值
+            t0 = performance.now();
+            confirmed = false;
             setState('pending', '連線中…', broker);
             elSetupLink.style.display = 'none';
+            elMetaTime.textContent = '';
+            elMetaIp.textContent = '';
 
             const topicCmd = `iot/v1/${TENANT_ID}/${user}/cmd`;
             const topicState = `iot/v1/${TENANT_ID}/${user}/state`;
             const topicStatus = `iot/v1/${TENANT_ID}/${user}/status`;
             const clientId = 'Opener_' + Math.random().toString(16).slice(2, 10);
             const client = new Paho.MQTT.Client(broker, 8884, clientId);
+            activeClient = client;
 
-            let confirmed = false;
             let timeoutId = null;
 
             client.onConnectionLost = (res) => {
+                busy = false;
                 if (!confirmed && res.errorCode !== 0) {
                     setState('err', '連線中斷', res.errorMessage || '');
                 }
@@ -221,6 +256,7 @@
                     const data = JSON.parse(msg.payloadString);
                     if (data.state === 1) {
                         confirmed = true;
+                        busy = false;
                         clearTimeout(timeoutId);
                         const elapsedMs = Math.round(performance.now() - t0);
                         setState('ok', '門已開啟');
@@ -235,15 +271,22 @@
                 useSSL: true,
                 timeout: 8,
                 onSuccess: () => {
+                    // 訂閱 state 一定要在送出指令「之前」，否則裝置回應可能在我們
+                    // 訂閱好之前就到，導致收不到確認；但 status（IP）只是附加資訊，
+                    // 不影響開門本身是否成功，故延後到送出指令之後才訂閱，
+                    // 讓開門指令盡早離開裝置，不被非必要的網路往返拖慢。
                     client.subscribe(topicState);
-                    client.subscribe(topicStatus);
+
                     const message = new Paho.MQTT.Message(JSON.stringify({ pin: relayPin, val: 1 }));
                     message.destinationName = topicCmd;
                     client.send(message);
                     setState('pending', '已送出開門指令…', '等待裝置回應');
 
+                    client.subscribe(topicStatus);
+
                     timeoutId = setTimeout(() => {
                         if (!confirmed) {
+                            busy = false;
                             const elapsedMs = Math.round(performance.now() - t0);
                             setState('err', '未收到裝置回應', '指令已送出，但無法確認是否成功');
                             elMetaTime.textContent = `已等待：${elapsedMs} ms`;
@@ -251,13 +294,15 @@
                     }, CONFIRM_TIMEOUT_MS);
                 },
                 onFailure: (err) => {
+                    busy = false;
                     setState('err', '連線失敗', (err && err.errorMessage) || '請檢查網路');
                 }
             });
         }
 
         elRetry.addEventListener('click', () => {
-            location.reload();
+            busy = false; // 手動重試要能立即觸發，不受 busy 旗標卡住
+            attemptOpen();
         });
     </script>
 </body>
